@@ -1,23 +1,10 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
 import (
 	"os"
 	"strconv"
 
 	"github.com/google/uuid"
-)
-
-type TaskType int;
-
-const (
-	MapTask TaskType = iota
-	ReduceTask
 )
 
 type RegisterArgs struct {
