@@ -12,17 +12,31 @@ type Coordinator struct {
 
 }
 
-// Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
+	// Your code here.
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
 	return nil
 }
+
+func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	// Your code here.
+	
+	return nil
+}
+
+func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
+	// Your code here.
+	
+	return nil
+}
+
+func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error{
+	// Your code here.
+
+	return nil
+}
+
+
 
 
 //

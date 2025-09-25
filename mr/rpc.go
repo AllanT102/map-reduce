@@ -6,24 +6,57 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+	"github.com/google/uuid"
+)
 
-type ExampleArgs struct {
-	X int
+type TaskType int;
+
+const (
+	MapTask TaskType = iota
+	ReduceTask
+)
+
+type RegisterArgs struct {
+	WorkerId uuid.UUID
 }
 
-type ExampleReply struct {
-	Y int
+type RegisterReply struct {
+	WorkerId uuid.UUID
+}
+type RequestTaskArgs struct {
+	WorkerId int
 }
 
-// Add your RPC definitions here.
+type RequestTaskReply struct {
+	TaskType TaskType
+	TaskId uuid.UUID
+	Filename string
+	NReduce int
+	PartitionStart int
+	PartitionSize int
+}
 
+type CompleteTaskArgs struct {
+	WorkerId uuid.UUID
+	TaskId uuid.UUID
+	IntermediateFiles[] string
+}
+
+type CompleteTaskReply struct {
+	// empty for now
+}
+
+type HeartbeatArgs struct {
+	WorkerId uuid.UUID
+}
+
+type HeartbeatReply struct {
+	// empty for now
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
