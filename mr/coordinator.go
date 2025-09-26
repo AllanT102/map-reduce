@@ -27,12 +27,24 @@ const (
 )
 
 type Task struct {
-	status TaskStatus
+	id        uuid.UUID
+	typ       TaskType
+	status    TaskStatus
+	fileNames []string // for map task, this is input file name; for reduce task, this is intermediate file names
 }
 
 type WorkerMetadata struct {
 	id            uuid.UUID
 	lastHeartbeat time.Time
+}
+
+type MapTaskV2 struct {
+	FileName        string
+	OutputFileNames []string
+}
+
+type ReduceTaskV2 struct {
+	FileNames []string
 }
 
 /*
@@ -73,30 +85,59 @@ If coordinator does not receive heartbeat from worker for 10 seconds, it marks w
 Coordinator reassigns tasks assigned to that worker to other idle workers
 -> this is done by finding another waiting worker and assigning the same task to it
 
-
-
+Reducer needs to wait until all M partitions are done before it can start reducing
+-> barrier implementation?
 */
 type Coordinator struct {
-	mappers  map[uuid.UUID]map[uuid.UUID]*Task
-	reducers map[uuid.UUID]map[uuid.UUID]*Task
-	mMutex   sync.Mutex
-	rMutex   sync.Mutex
+	workers  map[uuid.UUID]*WorkerMetadata
+	tasks    map[uuid.UUID]map[uuid.UUID]*Task // map of worker ID to map of taskId to Task
+	m        sync.Mutex
+	taskPool chan Task
 }
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
-	// Your code here.
+	if args == nil || reply == nil || c.workers[args.WorkerId] != nil {
+		return nil
+	}
+
+	c.m.Lock()
+	defer c.m.Unlock()
+	c.workers[args.WorkerId] = &WorkerMetadata{
+		id:            args.WorkerId,
+		lastHeartbeat: time.Now(),
+	}
+
 	return nil
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	// Your code here.
+	c.m.Lock()
+	defer c.m.Unlock()
 
+	select {
+	case task, ok := <-c.taskPool:
+		if !ok {
+			return nil
+		}
+		task.status = InProgress
+		reply.Task = task
+		if c.tasks[args.WorkerId] == nil {
+			c.tasks[args.WorkerId] = make(map[uuid.UUID]*Task)
+		}
+		c.tasks[args.WorkerId][task.id] = &task
+		
+	default:
+		return nil
+	}
 	return nil
 }
 
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
-	// Your code here.
+	c.m.Lock()
+	defer c.m.Unlock()
 
+	c.tasks.
+	// Your code here.
 	return nil
 }
 
@@ -134,10 +175,29 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		workers:  make(map[uuid.UUID]*WorkerMetadata),
+		taskPool: make(chan Task, len(files)), // buffer size equal to number of tasks
+		m:        sync.Mutex{},
+	}
 
-	// Your code here.
+	for _, file := range files {
+		c.taskPool <- Task{
+			id:        uuid.New(),
+			typ:       MapTask,
+			status:    Idle,
+			fileNames: []string{file},
+		}
+	}
+
+	go c.heartbeatMonitor()
+
+	// create map tasks for each input file
 
 	c.server()
 	return &c
+}
+
+func (c *Coordinator) heartbeatMonitor() {
+
 }

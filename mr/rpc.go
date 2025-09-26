@@ -15,13 +15,11 @@ type RegisterReply struct {
 	WorkerId uuid.UUID
 }
 type RequestTaskArgs struct {
-	WorkerId int
+	WorkerId uuid.UUID
 }
 
 type RequestTaskReply struct {
-	TaskType TaskType
-	TaskId uuid.UUID
-	Filename string
+	Task      Task
 	NReduce int
 	PartitionStart int
 	PartitionSize int
