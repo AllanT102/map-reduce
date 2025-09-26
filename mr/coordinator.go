@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -36,15 +37,6 @@ type Task struct {
 type WorkerMetadata struct {
 	id            uuid.UUID
 	lastHeartbeat time.Time
-}
-
-type MapTaskV2 struct {
-	FileName        string
-	OutputFileNames []string
-}
-
-type ReduceTaskV2 struct {
-	FileNames []string
 }
 
 /*
@@ -89,11 +81,14 @@ Reducer needs to wait until all M partitions are done before it can start reduci
 -> barrier implementation?
 */
 type Coordinator struct {
-	workers  map[uuid.UUID]*WorkerMetadata
-	tasks    map[uuid.UUID]map[uuid.UUID]*Task // map of worker ID to map of taskId to Task
-	m        sync.Mutex
-	taskPool chan Task
-	nReduce  int
+	workers            map[uuid.UUID]*WorkerMetadata
+	tasks              map[uuid.UUID]map[uuid.UUID]*Task // map of worker ID to map of taskId to Task
+	m                  sync.Mutex
+	taskPool           chan Task
+	nReduce            int
+	nInitialInputFiles int
+	wg                 sync.WaitGroup
+	doneCh             chan struct{}
 }
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
@@ -127,7 +122,6 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			c.tasks[args.WorkerId] = make(map[uuid.UUID]*Task)
 		}
 		c.tasks[args.WorkerId][task.id] = &task
-
 	default:
 		return nil
 	}
@@ -139,24 +133,25 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	defer c.m.Unlock()
 
 	c.tasks[args.WorkerId][args.TaskId].status = Completed
+
 	if c.tasks[args.WorkerId][args.TaskId].typ == MapTask {
-		// either create reduce tasks here or have a goroutine to do continously check if map tasks are done
 		c.tasks[args.WorkerId][args.TaskId].fileNames = args.IntermediateFiles
 	}
 
-	// maybe have a channel to keep track of completed tasks so that when chanel 
-	// length == total tasks sent out, then you can start reduction phase
+	// decrement wg to signal one task complete
+	c.wg.Done()
+
 	return nil
 }
 
 func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
 	c.m.Lock()
 	defer c.m.Unlock()
-	
+
 	if args == nil || c.workers[args.WorkerId] == nil {
 		return nil
 	}
-	
+
 	c.workers[args.WorkerId].lastHeartbeat = time.Now()
 	return nil
 }
@@ -178,11 +173,13 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	
-
-	return ret
+	select {
+	case <-c.doneCh:
+		close(c.doneCh)
+		return true
+	default:
+		return false
+	}
 }
 
 // create a Coordinator.
@@ -190,9 +187,13 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		workers:  make(map[uuid.UUID]*WorkerMetadata),
-		taskPool: make(chan Task, len(files)), // buffer size equal to number of tasks
-		m:        sync.Mutex{},
+		workers:            make(map[uuid.UUID]*WorkerMetadata),
+		taskPool:           make(chan Task, len(files)), // buffer size equal to number of tasks
+		m:                  sync.Mutex{},
+		nInitialInputFiles: len(files),
+		nReduce:            nReduce,
+		wg:                 sync.WaitGroup{},
+		doneCh:             make(chan struct{}),
 	}
 
 	for _, file := range files {
@@ -204,9 +205,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 	}
 
+	go c.mapTaskMonitor()
 	go c.heartbeatMonitor()
-
-	// create map tasks for each input file
 
 	c.server()
 	return &c
@@ -214,4 +214,73 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 func (c *Coordinator) heartbeatMonitor() {
 
+}
+
+/*
+*
+Initially there are M map tasks and R reduce tasks.
+
+# M is known when MakeCoordinator is invoked, and nReduce
+
+Thus, mapping phase completes when M * R tasks intermediate files have been produced
+*/
+func (c *Coordinator) mapTaskMonitor() {
+	c.wg.Add(c.nInitialInputFiles * c.nReduce)
+
+	// barrier
+	c.wg.Wait()
+
+	// start reduce phase
+	c.initReducePhase()
+}
+
+func (c *Coordinator) reduceTaskMonitor() {
+	c.wg.Add(c.nReduce)
+
+	// barrier
+	c.wg.Wait()
+
+	// all tasks done, cleanup
+	close(c.taskPool)
+
+	// signal done
+	c.doneCh <- struct{}{}
+}
+
+func (c *Coordinator) initReducePhase() {
+	// create R reduce tasks and add to task pool
+	intermediateFilesByPartition := make(map[int][]string)
+
+	// this is slow af, try to optimize later if possible
+	for _, workerTasks := range c.tasks {
+		for _, task := range workerTasks {
+			if task.typ == MapTask {
+				for _, fileName := range task.fileNames {
+					reducePartition := extractReducePartition(fileName)
+					intermediateFilesByPartition[reducePartition] = append(intermediateFilesByPartition[reducePartition], fileName)
+				}
+			}
+		}
+	}
+
+	for partition, fileNames := range intermediateFilesByPartition {
+		c.taskPool <- Task{
+			id:        uuid.New(),
+			typ:       ReduceTask,
+			status:    Idle,
+			fileNames: fileNames,
+		}
+		fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
+	}
+
+	go c.reduceTaskMonitor()
+}
+
+func extractReducePartition(fileName string) int {
+	var reducePartition int
+	_, err := fmt.Sscanf(fileName, "mr-%*d-%d", &reducePartition)
+	if err != nil {
+		log.Fatalf("failed to extract reduce partition from file name %s: %v", fileName, err)
+	}
+	return reducePartition
 }
