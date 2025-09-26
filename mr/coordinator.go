@@ -130,9 +130,14 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		if !ok {
 			return nil
 		}
+
 		task.status = InProgress
 		reply.Task = task
-		reply.NReduce = c.nReduce
+		if task.typ == ReduceTask {
+			reply.NReduce = c.nReduce
+		}
+
+		// first task assigned to worker
 		if c.tasks[args.WorkerId] == nil {
 			c.tasks[args.WorkerId] = make(map[uuid.UUID]*Task)
 		}
@@ -145,6 +150,8 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
 	c.tm.Lock()
+	c.stateM.Lock()
+	defer c.stateM.Unlock()
 	defer c.tm.Unlock()
 
 	// if the task is already marked as completed, ignore it
@@ -166,8 +173,6 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 
 	// if all reduce tasks are completed, mark state as done
 	if c.state == Reducing && len(c.completedReducers) == c.nReduce {
-		c.stateM.Lock()
-		defer c.stateM.Unlock()
 		c.state = Done
 		c.doneCh <- struct{}{}
 	}
@@ -268,10 +273,10 @@ to see if we need to redo the map tasks. if it hasn't done any map tasks, then w
 map phase. We can just reassign this reduce task.
 */
 func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
-	c.stateM.Lock()
 	c.tm.Lock()
-	defer c.stateM.Unlock()
+	c.stateM.Lock()
 	defer c.tm.Unlock()
+	defer c.stateM.Unlock()
 
 	// if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
 	if c.state == Reducing {
@@ -320,7 +325,7 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 This function is called when a worker that executed a map task fails
 */
 func (c *Coordinator) notifyMapTaskFailure() {
-
+	// call worker RPC to reset, should store rpc ip in worker metadata
 }
 
 func (c *Coordinator) heartbeatMonitor() {
@@ -387,7 +392,10 @@ func (c *Coordinator) initReducePhase() {
 	}
 
 	for partition, fileNames := range intermediateFilesByPartition {
-
+		// do not assign task if that partition has already completed its reduce task
+		if c.completedReducers[partition] {
+			continue
+		}
 		c.taskPool <- Task{
 			id:        uuid.New(),
 			typ:       ReduceTask,
