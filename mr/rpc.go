@@ -21,8 +21,6 @@ type RequestTaskArgs struct {
 type RequestTaskReply struct {
 	Task      Task
 	NReduce int
-	PartitionStart int
-	PartitionSize int
 }
 
 type CompleteTaskArgs struct {

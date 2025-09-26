@@ -93,6 +93,7 @@ type Coordinator struct {
 	tasks    map[uuid.UUID]map[uuid.UUID]*Task // map of worker ID to map of taskId to Task
 	m        sync.Mutex
 	taskPool chan Task
+	nReduce  int
 }
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
@@ -121,11 +122,12 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 		task.status = InProgress
 		reply.Task = task
+		reply.NReduce = c.nReduce
 		if c.tasks[args.WorkerId] == nil {
 			c.tasks[args.WorkerId] = make(map[uuid.UUID]*Task)
 		}
 		c.tasks[args.WorkerId][task.id] = &task
-		
+
 	default:
 		return nil
 	}
@@ -136,14 +138,26 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.m.Lock()
 	defer c.m.Unlock()
 
-	c.tasks.
-	// Your code here.
+	c.tasks[args.WorkerId][args.TaskId].status = Completed
+	if c.tasks[args.WorkerId][args.TaskId].typ == MapTask {
+		// either create reduce tasks here or have a goroutine to do continously check if map tasks are done
+		c.tasks[args.WorkerId][args.TaskId].fileNames = args.IntermediateFiles
+	}
+
+	// maybe have a channel to keep track of completed tasks so that when chanel 
+	// length == total tasks sent out, then you can start reduction phase
 	return nil
 }
 
 func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
-	// Your code here.
-
+	c.m.Lock()
+	defer c.m.Unlock()
+	
+	if args == nil || c.workers[args.WorkerId] == nil {
+		return nil
+	}
+	
+	c.workers[args.WorkerId].lastHeartbeat = time.Now()
 	return nil
 }
 
@@ -166,7 +180,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	ret := false
 
-	// Your code here.
+	
 
 	return ret
 }
