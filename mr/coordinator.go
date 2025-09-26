@@ -257,20 +257,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 }
 
 /*
-any map tasks completed assigned should be reassigned and idle
-any map/reduce tasks that are in progres should be idle and reassigned
+If state is in reducing phase and failed worker has only done reduce tasks, then just reassign reduce tasks to task pool and exit
 
-??
-any reduce task that has not yet read from the failed worker will read data from the new worker
+If state is in reducing phase and failed worker has done map tasks, then:
+- flush task pool
+- notify all reduce workers to re-request tasks
 
-Problems:
-- when this function is called, the task pool might not be empty, but we know for sure that
-if state is reducing then all tasks in task pool are reduce tasks, vice versa.
-Solution:
-- if in reducing state, then flush all the tasks in task pool and reassign all map tasks to idle state
-- if in reducing state, and we get a failure on this worker, we need to check if that worker has done any map tasks
-to see if we need to redo the map tasks. if it hasn't done any map tasks, then we don't need to retrigger the
-map phase. We can just reassign this reduce task.
+Loop over all map tasks that worker has completed and redo them
 */
 func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 	c.tm.Lock()
@@ -314,6 +307,7 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 		}
 	}
 
+	// since tasks are reassigned, delete the worker mapping as that worker has now technically not procesed any tasks
 	delete(c.tasks, failedWorkerId)
 
 	// start up the task monitor again because we are back in the mapping phase
