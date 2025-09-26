@@ -15,6 +15,7 @@ import (
 
 type TaskType int
 type TaskStatus int
+type MRState int
 
 const (
 	MapTask TaskType = iota
@@ -27,16 +28,24 @@ const (
 	Completed
 )
 
+const (
+	Mapping MRState = iota
+	Reducing
+	Done
+)
+
 type Task struct {
 	id        uuid.UUID
 	typ       TaskType
 	status    TaskStatus
 	fileNames []string // for map task, this is input file name; for reduce task, this is intermediate file names
+	partition int      // only used for reduce tasks
 }
 
 type WorkerMetadata struct {
 	id            uuid.UUID
 	lastHeartbeat time.Time
+	failed        bool
 }
 
 /*
@@ -83,12 +92,18 @@ Reducer needs to wait until all M partitions are done before it can start reduci
 type Coordinator struct {
 	workers            map[uuid.UUID]*WorkerMetadata
 	tasks              map[uuid.UUID]map[uuid.UUID]*Task // map of worker ID to map of taskId to Task
-	m                  sync.Mutex
+	wm                 sync.Mutex
+	tm                 sync.Mutex
 	taskPool           chan Task
 	nReduce            int
 	nInitialInputFiles int
 	wg                 sync.WaitGroup
 	doneCh             chan struct{}
+
+	stateM sync.Mutex
+	state  MRState
+
+	completedReducers map[int]bool // used to keep track of completed reduce tasks to avoid retriggering
 }
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
@@ -96,8 +111,8 @@ func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
 		return nil
 	}
 
-	c.m.Lock()
-	defer c.m.Unlock()
+	c.wm.Lock()
+	defer c.wm.Unlock()
 	c.workers[args.WorkerId] = &WorkerMetadata{
 		id:            args.WorkerId,
 		lastHeartbeat: time.Now(),
@@ -107,8 +122,8 @@ func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	c.m.Lock()
-	defer c.m.Unlock()
+	c.tm.Lock()
+	defer c.tm.Unlock()
 
 	select {
 	case task, ok := <-c.taskPool:
@@ -129,8 +144,15 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 }
 
 func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
-	c.m.Lock()
-	defer c.m.Unlock()
+	c.tm.Lock()
+	defer c.tm.Unlock()
+
+	// if the task is already marked as completed, ignore it
+	if args != nil && c.tasks[args.WorkerId] != nil &&
+		c.tasks[args.WorkerId][args.TaskId] != nil &&
+		c.tasks[args.WorkerId][args.TaskId].status == Completed {
+		return nil
+	}
 
 	c.tasks[args.WorkerId][args.TaskId].status = Completed
 
@@ -138,15 +160,27 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 		c.tasks[args.WorkerId][args.TaskId].fileNames = args.IntermediateFiles
 	}
 
+	if c.tasks[args.WorkerId][args.TaskId].typ == ReduceTask {
+		c.completedReducers[c.tasks[args.WorkerId][args.TaskId].partition] = true
+	}
+
+	// if all reduce tasks are completed, mark state as done
+	if c.state == Reducing && len(c.completedReducers) == c.nReduce {
+		c.stateM.Lock()
+		defer c.stateM.Unlock()
+		c.state = Done
+		c.doneCh <- struct{}{}
+	}
+
 	// decrement wg to signal one task complete
-	c.wg.Done()
+	// c.wg.Done()
 
 	return nil
 }
 
 func (c *Coordinator) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
-	c.m.Lock()
-	defer c.m.Unlock()
+	c.wm.Lock()
+	defer c.wm.Unlock()
 
 	if args == nil || c.workers[args.WorkerId] == nil {
 		return nil
@@ -175,6 +209,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	select {
 	case <-c.doneCh:
+		close(c.taskPool)
 		close(c.doneCh)
 		return true
 	default:
@@ -188,12 +223,16 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		workers:            make(map[uuid.UUID]*WorkerMetadata),
-		taskPool:           make(chan Task, len(files)), // buffer size equal to number of tasks
-		m:                  sync.Mutex{},
+		tasks:              make(map[uuid.UUID]map[uuid.UUID]*Task), // map of worker ID to map of taskId to Task
+		taskPool:           make(chan Task, len(files)),             // buffer size equal to number of tasks
+		tm:                 sync.Mutex{},
+		wm:                 sync.Mutex{},
 		nInitialInputFiles: len(files),
 		nReduce:            nReduce,
 		wg:                 sync.WaitGroup{},
 		doneCh:             make(chan struct{}),
+		state:              Mapping,
+		stateM:             sync.Mutex{},
 	}
 
 	for _, file := range files {
@@ -212,39 +251,123 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
-func (c *Coordinator) heartbeatMonitor() {
+/*
+any map tasks completed assigned should be reassigned and idle
+any map/reduce tasks that are in progres should be idle and reassigned
 
+??
+any reduce task that has not yet read from the failed worker will read data from the new worker
+
+Problems:
+- when this function is called, the task pool might not be empty, but we know for sure that
+if state is reducing then all tasks in task pool are reduce tasks, vice versa.
+Solution:
+- if in reducing state, then flush all the tasks in task pool and reassign all map tasks to idle state
+- if in reducing state, and we get a failure on this worker, we need to check if that worker has done any map tasks
+to see if we need to redo the map tasks. if it hasn't done any map tasks, then we don't need to retrigger the
+map phase. We can just reassign this reduce task.
+*/
+func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
+	c.stateM.Lock()
+	c.tm.Lock()
+	defer c.stateM.Unlock()
+	defer c.tm.Unlock()
+
+	// if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
+	if c.state == Reducing {
+		hasCompletedMapTasks := false
+		for _, task := range c.tasks[failedWorkerId] {
+			if task.typ == MapTask {
+				hasCompletedMapTasks = true
+			}
+		}
+		// no map tasks found
+		if !hasCompletedMapTasks {
+			for _, task := range c.tasks[failedWorkerId] {
+				task.status = Idle
+				c.taskPool <- *task
+			}
+
+			delete(c.tasks, failedWorkerId)
+			return
+		}
+	}
+
+	// flush task pool if in reduce phase and notify all reduce workers to re-request tasks
+	if c.state == Reducing {
+		c.notifyMapTaskFailure()
+		for len(c.taskPool) > 0 {
+			<-c.taskPool
+		}
+	}
+
+	// loop over all map tasks that worker has completed and redo them
+	for _, task := range c.tasks[failedWorkerId] {
+		if task.typ == MapTask {
+			task.status = Idle
+			c.taskPool <- *task
+		}
+	}
+
+	delete(c.tasks, failedWorkerId)
+
+	// start up the task monitor again because we are back in the mapping phase
+	c.state = Mapping
+	go c.mapTaskMonitor()
 }
 
 /*
-*
-Initially there are M map tasks and R reduce tasks.
-
-# M is known when MakeCoordinator is invoked, and nReduce
-
-Thus, mapping phase completes when M * R tasks intermediate files have been produced
+This function is called when a worker that executed a map task fails
 */
-func (c *Coordinator) mapTaskMonitor() {
-	c.wg.Add(c.nInitialInputFiles * c.nReduce)
+func (c *Coordinator) notifyMapTaskFailure() {
 
-	// barrier
-	c.wg.Wait()
+}
+
+func (c *Coordinator) heartbeatMonitor() {
+	c.wm.Lock()
+	defer c.wm.Unlock()
+	for workerId, workerMetadata := range c.workers {
+		if workerMetadata.failed {
+			return
+		}
+
+		if time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
+			workerMetadata.failed = true
+			c.handleFailedWorkerTasks(workerId)
+		} else {
+			workerMetadata.lastHeartbeat = time.Now()
+			return
+		}
+	}
+}
+
+func (c *Coordinator) mapTaskMonitor() {
+	// c.wg.Add(c.nInitialInputFiles)
+
+	// // barrier
+	// c.wg.Wait()
+
+	// hacky as fuck, but barrier/wg impl introduces edge cases
+	for {
+		c.tm.Lock()
+		count := 0
+		for _, workerTasks := range c.tasks {
+			for _, task := range workerTasks {
+				if task.typ == MapTask && task.status == Completed {
+					count++
+				}
+			}
+		}
+
+		if count == c.nInitialInputFiles {
+			break
+		}
+		c.tm.Unlock()
+		time.Sleep(time.Second)
+	}
 
 	// start reduce phase
 	c.initReducePhase()
-}
-
-func (c *Coordinator) reduceTaskMonitor() {
-	c.wg.Add(c.nReduce)
-
-	// barrier
-	c.wg.Wait()
-
-	// all tasks done, cleanup
-	close(c.taskPool)
-
-	// signal done
-	c.doneCh <- struct{}{}
 }
 
 func (c *Coordinator) initReducePhase() {
@@ -264,16 +387,20 @@ func (c *Coordinator) initReducePhase() {
 	}
 
 	for partition, fileNames := range intermediateFilesByPartition {
+
 		c.taskPool <- Task{
 			id:        uuid.New(),
 			typ:       ReduceTask,
 			status:    Idle,
 			fileNames: fileNames,
+			partition: partition,
 		}
 		fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
 	}
 
-	go c.reduceTaskMonitor()
+	c.stateM.Lock()
+	defer c.stateM.Unlock()
+	c.state = Reducing
 }
 
 func extractReducePartition(fileName string) int {
