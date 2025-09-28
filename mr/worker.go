@@ -1,41 +1,230 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
 
+	"github.com/google/uuid"
+)
 
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// for sorting by key.
+type ByKey []KeyValue
 
-//
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+var workerId uuid.UUID
+
 // main/mrworker.go calls this function.
-//
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	workerId = uuid.New()
 
-	// Your worker implementation here.
+	registerWorker()
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	go heartbeat()
 
+	for {
+		reqTaskReply := requestTask()
+		if reqTaskReply == nil {
+			fmt.Printf("Worker %v: no task yet or failed RPC\n", workerId)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		if !reqTaskReply.HasTask {
+			fmt.Printf("Worker %v: no tasks currently, retrying...", workerId)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		task := reqTaskReply.Task
+		nReduce := reqTaskReply.NReduce
+		fmt.Printf("Worker %v received task: %v\n", workerId, task)
+
+		switch task.Typ {
+		case MapTask:
+			executeMapTask(&task, nReduce, mapf)
+		case ReduceTask:
+			executeReduceTask(&task, reducef)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// Calls the Register RPC with the workerId
+func registerWorker() {
+	regArgs := RegisterArgs{WorkerId: workerId}
+	regReply := RegisterReply{}
+	ok := call("Coordinator.Register", &regArgs, &regReply)
+	if !ok {
+		log.Fatalf("Worker registration failed")
+	}
+	fmt.Printf("Worker registered with ID: %v\n", workerId)
+}
+
+// Runs the Heartbeat RPC every 2 seconds
+func heartbeat() {
+	for {
+		hbArgs := HeartbeatArgs{WorkerId: workerId}
+		hbReply := HeartbeatReply{}
+		call("Coordinator.Heartbeat", &hbArgs, &hbReply)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// Requests a task from the coordinator
+// Returns nil if no tasks available yet
+func requestTask() *RequestTaskReply {
+	reqArgs := RequestTaskArgs{WorkerId: workerId}
+	reqReply := RequestTaskReply{}
+	ok := call("Coordinator.RequestTask", &reqArgs, &reqReply)
+	if !ok {
+		fmt.Printf("Failed to request task. Retrying...")
+		return nil
+	}
+	return &reqReply
+}
+
+func executeMapTask(task *Task, nReduce int, mapf func(string, string) []KeyValue) {
+	fmt.Printf("Worker %v executing map task: %v\n", workerId, task)
+
+	inputFile := task.FileNames[0]
+	file, err := os.Open(inputFile)
+	if err != nil {
+		log.Fatalf("cannot open %v", inputFile)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", inputFile)
+	}
+	file.Close()
+	kva := mapf(inputFile, string(content))
+
+	partitionedFiles, err := writeIntermediateFiles(task.Id, kva, nReduce)
+	if err != nil {
+		log.Fatalf("Failed to write intermediate file: %v", err)
+	}
+
+	completeTask(task, partitionedFiles)
+}
+
+// writes intermedaite files to appropriate reducer's file
+// returns list of intermediate file names on success
+func writeIntermediateFiles(taskId uuid.UUID, kvs []KeyValue, nReduce int) ([]string, error) {
+	files := make([]string, nReduce)
+	encoders := make([]*json.Encoder, nReduce)
+	fileHandles := make([]*os.File, nReduce)
+
+	for i := 0; i < nReduce; i++ {
+		fileName := fmt.Sprintf("mr-%s-%d", taskId.String(), i)
+		files[i] = fileName
+
+		f, err := os.Create(fileName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create file %s: %v", fileName, err)
+		}
+
+		fileHandles[i] = f
+		encoders[i] = json.NewEncoder(f)
+	}
+
+	for _, kv := range kvs {
+		reduceIdx := ihash(kv.Key) % nReduce
+		if err := encoders[reduceIdx].Encode(&kv); err != nil {
+			return nil, fmt.Errorf("failed to encode key-value %v: %v", kv, err)
+		}
+	}
+
+	for _, f := range fileHandles {
+		f.Close()
+	}
+
+	return files, nil
+}
+
+// Notify coordinator of completed task
+func completeTask(task *Task, filenames []string) {
+	completeArgs := CompleteTaskArgs{
+		WorkerId:          workerId,
+		TaskId:            task.Id,
+		IntermediateFiles: filenames,
+	}
+	completeReply := CompleteTaskReply{}
+	call("Coordinator.CompleteTask", &completeArgs, &completeReply)
+}
+
+func executeReduceTask(task *Task, reducef func(string, []string) string) {
+	fmt.Printf("Worker %v executing reduce task: %v\n", workerId, task)
+
+	intermediate := []KeyValue{}
+	for _, fileName := range task.FileNames {
+		f, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open intermediate file %v: %v", fileName, err)
+		}
+
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		f.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	fileName := fmt.Sprintf("mr-out-%d", task.Partition)
+	outputFile, err := os.Create(fileName)
+	if err != nil {
+		log.Fatalf("cannot create output file %v: %v", outputFile, err)
+	}
+	defer outputFile.Close()
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(outputFile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	completeTask(task, nil)
 }
 
 //
@@ -67,11 +256,9 @@ func Worker(mapf func(string, string) []KeyValue,
 // 	}
 // }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
