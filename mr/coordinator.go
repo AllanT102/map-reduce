@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,11 +37,11 @@ const (
 )
 
 type Task struct {
-	id        uuid.UUID
-	typ       TaskType
-	status    TaskStatus
-	fileNames []string // for map task, this is input file name; for reduce task, this is intermediate file names
-	partition int      // only used for reduce tasks
+	Id        uuid.UUID
+	Typ       TaskType
+	Status    TaskStatus
+	FileNames []string // for map task, this is input file name; for reduce task, this is intermediate file names
+	Partition int      // only used for reduce tasks
 }
 
 type WorkerMetadata struct {
@@ -118,6 +120,8 @@ func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
 		lastHeartbeat: time.Now(),
 	}
 
+	reply.WorkerId = args.WorkerId
+
 	return nil
 }
 
@@ -125,15 +129,20 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 	c.tm.Lock()
 	defer c.tm.Unlock()
 
+	fmt.Printf("Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
+
 	select {
 	case task, ok := <-c.taskPool:
 		if !ok {
+			reply.HasTask = false
 			return nil
 		}
 
-		task.status = InProgress
+		task.Status = InProgress
 		reply.Task = task
-		if task.typ == ReduceTask {
+		reply.HasTask = true
+
+		if task.Typ == MapTask {
 			reply.NReduce = c.nReduce
 		}
 
@@ -141,9 +150,9 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		if c.tasks[args.WorkerId] == nil {
 			c.tasks[args.WorkerId] = make(map[uuid.UUID]*Task)
 		}
-		c.tasks[args.WorkerId][task.id] = &task
+		c.tasks[args.WorkerId][task.Id] = &task
 	default:
-		return nil
+		reply.HasTask = false
 	}
 	return nil
 }
@@ -157,18 +166,18 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	// if the task is already marked as completed, ignore it
 	if args != nil && c.tasks[args.WorkerId] != nil &&
 		c.tasks[args.WorkerId][args.TaskId] != nil &&
-		c.tasks[args.WorkerId][args.TaskId].status == Completed {
+		c.tasks[args.WorkerId][args.TaskId].Status == Completed {
 		return nil
 	}
 
-	c.tasks[args.WorkerId][args.TaskId].status = Completed
+	c.tasks[args.WorkerId][args.TaskId].Status = Completed
 
-	if c.tasks[args.WorkerId][args.TaskId].typ == MapTask {
-		c.tasks[args.WorkerId][args.TaskId].fileNames = args.IntermediateFiles
+	if c.tasks[args.WorkerId][args.TaskId].Typ == MapTask {
+		c.tasks[args.WorkerId][args.TaskId].FileNames = args.IntermediateFiles
 	}
 
-	if c.tasks[args.WorkerId][args.TaskId].typ == ReduceTask {
-		c.completedReducers[c.tasks[args.WorkerId][args.TaskId].partition] = true
+	if c.tasks[args.WorkerId][args.TaskId].Typ == ReduceTask {
+		c.completedReducers[c.tasks[args.WorkerId][args.TaskId].Partition] = true
 	}
 
 	// if all reduce tasks are completed, mark state as done
@@ -238,14 +247,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		doneCh:             make(chan struct{}),
 		state:              Mapping,
 		stateM:             sync.Mutex{},
+		completedReducers:  make(map[int]bool),
 	}
 
 	for _, file := range files {
 		c.taskPool <- Task{
-			id:        uuid.New(),
-			typ:       MapTask,
-			status:    Idle,
-			fileNames: []string{file},
+			Id:        uuid.New(),
+			Typ:       MapTask,
+			Status:    Idle,
+			FileNames: []string{file},
 		}
 	}
 
@@ -275,14 +285,14 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 	if c.state == Reducing {
 		hasCompletedMapTasks := false
 		for _, task := range c.tasks[failedWorkerId] {
-			if task.typ == MapTask {
+			if task.Typ == MapTask {
 				hasCompletedMapTasks = true
 			}
 		}
 		// no map tasks found
 		if !hasCompletedMapTasks {
 			for _, task := range c.tasks[failedWorkerId] {
-				task.status = Idle
+				task.Status = Idle
 				c.taskPool <- *task
 			}
 
@@ -301,8 +311,8 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 
 	// loop over all map tasks that worker has completed and redo them
 	for _, task := range c.tasks[failedWorkerId] {
-		if task.typ == MapTask {
-			task.status = Idle
+		if task.Typ == MapTask {
+			task.Status = Idle
 			c.taskPool <- *task
 		}
 	}
@@ -334,7 +344,7 @@ func (c *Coordinator) heartbeatMonitor() {
 			workerMetadata.failed = true
 			c.handleFailedWorkerTasks(workerId)
 		} else {
-			workerMetadata.lastHeartbeat = time.Now()
+			workerMetadata.lastHeartbeat = time.Now() // Why?
 			return
 		}
 	}
@@ -352,13 +362,14 @@ func (c *Coordinator) mapTaskMonitor() {
 		count := 0
 		for _, workerTasks := range c.tasks {
 			for _, task := range workerTasks {
-				if task.typ == MapTask && task.status == Completed {
+				if task.Typ == MapTask && task.Status == Completed {
 					count++
 				}
 			}
 		}
 
 		if count == c.nInitialInputFiles {
+			c.tm.Unlock()
 			break
 		}
 		c.tm.Unlock()
@@ -376,8 +387,8 @@ func (c *Coordinator) initReducePhase() {
 	// this is slow af, try to optimize later if possible
 	for _, workerTasks := range c.tasks {
 		for _, task := range workerTasks {
-			if task.typ == MapTask {
-				for _, fileName := range task.fileNames {
+			if task.Typ == MapTask {
+				for _, fileName := range task.FileNames {
 					reducePartition := extractReducePartition(fileName)
 					intermediateFilesByPartition[reducePartition] = append(intermediateFilesByPartition[reducePartition], fileName)
 				}
@@ -391,13 +402,14 @@ func (c *Coordinator) initReducePhase() {
 			continue
 		}
 		c.taskPool <- Task{
-			id:        uuid.New(),
-			typ:       ReduceTask,
-			status:    Idle,
-			fileNames: fileNames,
-			partition: partition,
+			Id:        uuid.New(),
+			Typ:       ReduceTask,
+			Status:    Idle,
+			FileNames: fileNames,
+			Partition: partition,
 		}
 		fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
+		fmt.Printf("Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
 	}
 
 	c.stateM.Lock()
@@ -406,8 +418,9 @@ func (c *Coordinator) initReducePhase() {
 }
 
 func extractReducePartition(fileName string) int {
-	var reducePartition int
-	_, err := fmt.Sscanf(fileName, "mr-%*d-%d", &reducePartition)
+	parts := strings.Split(fileName, "-")
+	numStr := parts[len(parts)-1]
+	reducePartition, err := strconv.Atoi(numStr)
 	if err != nil {
 		log.Fatalf("failed to extract reduce partition from file name %s: %v", fileName, err)
 	}

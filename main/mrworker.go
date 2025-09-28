@@ -10,11 +10,13 @@ package main
 // Please do not change this file.
 //
 
-import "cpsc416-2025w1/Lab01/mr"	
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"cpsc416-2025w1/Lab01/mr"
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+)
 
 func main() {
 	if len(os.Args) != 2 {

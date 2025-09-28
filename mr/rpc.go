@@ -19,14 +19,15 @@ type RequestTaskArgs struct {
 }
 
 type RequestTaskReply struct {
-	Task      Task
+	Task    Task
 	NReduce int
+	HasTask bool
 }
 
 type CompleteTaskArgs struct {
-	WorkerId uuid.UUID
-	TaskId uuid.UUID
-	IntermediateFiles[] string
+	WorkerId          uuid.UUID
+	TaskId            uuid.UUID
+	IntermediateFiles []string
 }
 
 type CompleteTaskReply struct {
