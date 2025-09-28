@@ -49,13 +49,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	for {
 		reqTaskReply := requestTask()
 		if reqTaskReply == nil {
-			fmt.Printf("Worker %v: no task yet or failed RPC\n", workerId)
+			fmt.Printf("Worker %v: failed RPC\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
 
-		if !reqTaskReply.HasTask {
-			fmt.Printf("Worker %v: no tasks currently, retrying...", workerId)
+		if len(reqTaskReply.Task.FileNames) == 0 {
+			fmt.Printf("Worker %v: no task yet, retrying...\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -139,7 +139,7 @@ func writeIntermediateFiles(taskId uuid.UUID, kvs []KeyValue, nReduce int) ([]st
 	fileHandles := make([]*os.File, nReduce)
 
 	for i := 0; i < nReduce; i++ {
-		fileName := fmt.Sprintf("mr-%s-%d", taskId.String(), i)
+		fileName := fmt.Sprintf("mr-%s-%s-%d", taskId.String(), workerId.String(), i)
 		files[i] = fileName
 
 		f, err := os.Create(fileName)

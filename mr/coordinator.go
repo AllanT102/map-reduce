@@ -134,13 +134,11 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 	select {
 	case task, ok := <-c.taskPool:
 		if !ok {
-			reply.HasTask = false
 			return nil
 		}
 
 		task.Status = InProgress
 		reply.Task = task
-		reply.HasTask = true
 
 		if task.Typ == MapTask {
 			reply.NReduce = c.nReduce
@@ -152,7 +150,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 		c.tasks[args.WorkerId][task.Id] = &task
 	default:
-		reply.HasTask = false
+		return nil
 	}
 	return nil
 }
@@ -343,9 +341,6 @@ func (c *Coordinator) heartbeatMonitor() {
 		if time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
 			workerMetadata.failed = true
 			c.handleFailedWorkerTasks(workerId)
-		} else {
-			workerMetadata.lastHeartbeat = time.Now() // Why?
-			return
 		}
 	}
 }
