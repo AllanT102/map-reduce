@@ -48,6 +48,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	go heartbeat()
 
 	for {
+		fmt.Println("requesting task")
 		reqTaskReply := requestTask()
 		if reqTaskReply == nil {
 			fmt.Printf("Worker %v: failed RPC\n", workerId)

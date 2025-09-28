@@ -274,53 +274,69 @@ If state is in reducing phase and failed worker has done map tasks, then:
 Loop over all map tasks that worker has completed and redo them
 */
 func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
+	fmt.Println("Handling failed worker tasks for worker:", failedWorkerId)
 	c.tm.Lock()
 	c.stateM.Lock()
 	defer c.tm.Unlock()
 	defer c.stateM.Unlock()
 
-	// if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
-	if c.state == Reducing {
-		hasCompletedMapTasks := false
-		for _, task := range c.tasks[failedWorkerId] {
-			if task.Typ == MapTask {
-				hasCompletedMapTasks = true
-			}
-		}
-		// no map tasks found
-		if !hasCompletedMapTasks {
-			for _, task := range c.tasks[failedWorkerId] {
-				task.Status = Idle
-				c.taskPool <- *task
-			}
-
-			delete(c.tasks, failedWorkerId)
-			return
-		}
-	}
-
-	// flush task pool if in reduce phase and notify all reduce workers to re-request tasks
-	if c.state == Reducing {
-		c.notifyMapTaskFailure()
-		for len(c.taskPool) > 0 {
-			<-c.taskPool
-		}
-	}
-
-	// loop over all map tasks that worker has completed and redo them
 	for _, task := range c.tasks[failedWorkerId] {
-		if task.Typ == MapTask {
+		if c.state == Reducing && task.Typ == ReduceTask && task.Status != Completed {
+			task.Status = Idle
+			c.taskPool <- *task
+		}
+		if c.state == Mapping && task.Typ == MapTask && task.Status != Completed {
 			task.Status = Idle
 			c.taskPool <- *task
 		}
 	}
 
-	// since tasks are reassigned, delete the worker mapping as that worker has now technically not procesed any tasks
+	fmt.Println(len(c.taskPool), "tasks in the task pool after handling failed worker tasks")
 	delete(c.tasks, failedWorkerId)
+	fmt.Println("Finished handling failed worker tasks for worker:", failedWorkerId)
 
-	// start up the task monitor again because we are back in the mapping phase
-	c.state = Mapping
-	go c.mapTaskMonitor()
+	// // if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
+	// if c.state == Reducing {
+	// 	hasCompletedMapTasks := false
+	// 	for _, task := range c.tasks[failedWorkerId] {
+	// 		if task.Typ == MapTask {
+	// 			hasCompletedMapTasks = true
+	// 		}
+	// 	}
+	// 	// no map tasks found
+	// 	if !hasCompletedMapTasks {
+	// 		for _, task := range c.tasks[failedWorkerId] {
+	// 			task.Status = Idle
+	// 			c.taskPool <- *task
+	// 		}
+
+	// 		delete(c.tasks, failedWorkerId)
+	// 		return
+	// 	}
+	// }
+
+	// // flush task pool if in reduce phase and notify all reduce workers to re-request tasks
+	// if c.state == Reducing {
+	// 	c.notifyMapTaskFailure()
+	// 	for len(c.taskPool) > 0 {
+	// 		<-c.taskPool
+	// 	}
+	// }
+
+	// // loop over all map tasks that worker has completed and redo them
+	// for _, task := range c.tasks[failedWorkerId] {
+	// 	if task.Typ == MapTask {
+	// 		task.Status = Idle
+	// 		c.taskPool <- *task
+	// 	}
+	// }
+
+	// // since tasks are reassigned, delete the worker mapping as that worker has now technically not procesed any tasks
+	// delete(c.tasks, failedWorkerId)
+
+	// // start up the task monitor again because we are back in the mapping phase
+	// c.state = Mapping
+	// go c.mapTaskMonitor()
 }
 
 /*
@@ -331,16 +347,25 @@ func (c *Coordinator) notifyMapTaskFailure() {
 }
 
 func (c *Coordinator) heartbeatMonitor() {
-	c.wm.Lock()
-	defer c.wm.Unlock()
-	for workerId, workerMetadata := range c.workers {
-		if workerMetadata.failed {
+	for {
+		select {
+		case <-c.doneCh:
 			return
-		}
-
-		if time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
-			workerMetadata.failed = true
-			c.handleFailedWorkerTasks(workerId)
+		default:
+			fmt.Println("heartbeat check")
+			c.wm.Lock()
+			for workerId, workerMetadata := range c.workers {
+				if workerMetadata.failed {
+					break
+				}
+				
+				if time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
+					workerMetadata.failed = true
+					c.handleFailedWorkerTasks(workerId)
+				}
+			}
+			c.wm.Unlock()
+			time.Sleep(1 * time.Second)
 		}
 	}
 }
@@ -404,7 +429,7 @@ func (c *Coordinator) initReducePhase() {
 			Partition: partition,
 		}
 		fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
-		fmt.Printf("Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
+		fmt.Printf("p2.Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
 	}
 
 	c.stateM.Lock()
