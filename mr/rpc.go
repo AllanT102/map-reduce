@@ -21,7 +21,6 @@ type RequestTaskArgs struct {
 type RequestTaskReply struct {
 	Task    Task
 	NReduce int
-	HasTask bool
 }
 
 type CompleteTaskArgs struct {
