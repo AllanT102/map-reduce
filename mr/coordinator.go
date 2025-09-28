@@ -161,14 +161,18 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	defer c.stateM.Unlock()
 	defer c.tm.Unlock()
 
+	fmt.Printf("CompleteTask called: worker=%v, task=%v\n", args.WorkerId, args.TaskId)
+
 	// if the task is already marked as completed, ignore it
 	if args != nil && c.tasks[args.WorkerId] != nil &&
 		c.tasks[args.WorkerId][args.TaskId] != nil &&
 		c.tasks[args.WorkerId][args.TaskId].Status == Completed {
+		fmt.Printf("Task %v from worker %v already completed, ignoring\n", args.TaskId, args.WorkerId)
 		return nil
 	}
 
 	c.tasks[args.WorkerId][args.TaskId].Status = Completed
+	fmt.Printf("Task %v from worker %v marked as Completed\n", args.TaskId, args.WorkerId)
 
 	if c.tasks[args.WorkerId][args.TaskId].Typ == MapTask {
 		c.tasks[args.WorkerId][args.TaskId].FileNames = args.IntermediateFiles
@@ -236,7 +240,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		workers:            make(map[uuid.UUID]*WorkerMetadata),
 		tasks:              make(map[uuid.UUID]map[uuid.UUID]*Task), // map of worker ID to map of taskId to Task
-		taskPool:           make(chan Task, len(files)),             // buffer size equal to number of tasks
+		taskPool:           make(chan Task, len(files)+nReduce),     // buffer size equal to number of tasks
 		tm:                 sync.Mutex{},
 		wm:                 sync.Mutex{},
 		nInitialInputFiles: len(files),
@@ -292,7 +296,7 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 	}
 
 	fmt.Println(len(c.taskPool), "tasks in the task pool after handling failed worker tasks")
-	delete(c.tasks, failedWorkerId)
+	// delete(c.tasks, failedWorkerId)
 	fmt.Println("Finished handling failed worker tasks for worker:", failedWorkerId)
 
 	// // if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
@@ -352,20 +356,20 @@ func (c *Coordinator) heartbeatMonitor() {
 		case <-c.doneCh:
 			return
 		default:
-			fmt.Println("heartbeat check")
+			// fmt.Println("heartbeat check")
 			c.wm.Lock()
+			failedWorkers := []uuid.UUID{}
 			for workerId, workerMetadata := range c.workers {
-				if workerMetadata.failed {
-					break
-				}
-				
-				if time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
+				if !workerMetadata.failed && time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
 					workerMetadata.failed = true
-					c.handleFailedWorkerTasks(workerId)
+					failedWorkers = append(failedWorkers, workerId)
 				}
 			}
 			c.wm.Unlock()
-			time.Sleep(1 * time.Second)
+
+			for _, workerId := range failedWorkers {
+				c.handleFailedWorkerTasks(workerId)
+			}
 		}
 	}
 }
@@ -387,8 +391,10 @@ func (c *Coordinator) mapTaskMonitor() {
 				}
 			}
 		}
+		fmt.Printf("mapTaskMonitor: %d/%d map tasks completed\n", count, c.nInitialInputFiles)
 
 		if count == c.nInitialInputFiles {
+			fmt.Println("All map tasks completed, initializing reduce phase")
 			c.tm.Unlock()
 			break
 		}
@@ -407,7 +413,7 @@ func (c *Coordinator) initReducePhase() {
 	// this is slow af, try to optimize later if possible
 	for _, workerTasks := range c.tasks {
 		for _, task := range workerTasks {
-			if task.Typ == MapTask {
+			if task.Typ == MapTask && task.Status == Completed {
 				for _, fileName := range task.FileNames {
 					reducePartition := extractReducePartition(fileName)
 					intermediateFilesByPartition[reducePartition] = append(intermediateFilesByPartition[reducePartition], fileName)
