@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/rpc"
@@ -134,21 +135,20 @@ func executeMapTask(task *Task, nReduce int, mapf func(string, string) []KeyValu
 // writes intermedaite files to appropriate reducer's file
 // returns list of intermediate file names on success
 func writeIntermediateFiles(taskId uuid.UUID, kvs []KeyValue, nReduce int) ([]string, error) {
-	files := make([]string, nReduce)
 	encoders := make([]*json.Encoder, nReduce)
-	fileHandles := make([]*os.File, nReduce)
+	tmpFiles := make([]*os.File, nReduce)
+	finalNames := make([]string, nReduce)
 
 	for i := 0; i < nReduce; i++ {
-		fileName := fmt.Sprintf("mr-%s-%s-%d", taskId.String(), workerId.String(), i)
-		files[i] = fileName
-
-		f, err := os.Create(fileName)
+		finalName := fmt.Sprintf("mr-%s-%s-%d", taskId.String(), workerId.String(), i)
+		tmpFile, err := os.CreateTemp("", finalName+"-*")
 		if err != nil {
-			return nil, fmt.Errorf("failed to create file %s: %v", fileName, err)
+			return nil, fmt.Errorf("failed to create temp tile for %s: %v", finalName, err)
 		}
 
-		fileHandles[i] = f
-		encoders[i] = json.NewEncoder(f)
+		tmpFiles[i] = tmpFile
+		encoders[i] = json.NewEncoder(tmpFile)
+		finalNames[i] = finalName
 	}
 
 	for _, kv := range kvs {
@@ -158,11 +158,16 @@ func writeIntermediateFiles(taskId uuid.UUID, kvs []KeyValue, nReduce int) ([]st
 		}
 	}
 
-	for _, f := range fileHandles {
-		f.Close()
+	for i, tmpFile := range tmpFiles {
+		if err := tmpFile.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close temp file: %v", err)
+		}
+		if err := os.Rename(tmpFile.Name(), finalNames[i]); err != nil {
+			return nil, fmt.Errorf("failed to rename temp file to %s: %v", finalNames[i], err)
+		}
 	}
 
-	return files, nil
+	return finalNames, nil
 }
 
 // Notify coordinator of completed task
@@ -190,7 +195,10 @@ func executeReduceTask(task *Task, reducef func(string, []string) string) {
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
-				break
+				if err == io.EOF {
+					break
+				}
+				log.Fatalf("decode error in %s: %v", fileName, err)
 			}
 			intermediate = append(intermediate, kv)
 		}
