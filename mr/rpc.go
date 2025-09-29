@@ -44,7 +44,7 @@ type HeartbeatReply struct {
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 func coordinatorSock() string {
-	s := "/var/tmp/416-mr-fish1"
+	s := "/var/tmp/416-mr-"
 	s += strconv.Itoa(os.Getuid())
 	return s
 }

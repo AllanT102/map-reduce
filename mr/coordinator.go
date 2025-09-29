@@ -246,7 +246,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		nInitialInputFiles: len(files),
 		nReduce:            nReduce,
 		wg:                 sync.WaitGroup{},
-		doneCh:             make(chan struct{}),
+		doneCh:             make(chan struct{}, 1),
 		state:              Mapping,
 		stateM:             sync.Mutex{},
 		completedReducers:  make(map[int]bool),
@@ -352,25 +352,26 @@ func (c *Coordinator) notifyMapTaskFailure() {
 
 func (c *Coordinator) heartbeatMonitor() {
 	for {
-		select {
-		case <-c.doneCh:
+		if c.state == Done {
 			return
-		default:
-			// fmt.Println("heartbeat check")
-			c.wm.Lock()
-			failedWorkers := []uuid.UUID{}
-			for workerId, workerMetadata := range c.workers {
-				if !workerMetadata.failed && time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
-					workerMetadata.failed = true
-					failedWorkers = append(failedWorkers, workerId)
-				}
-			}
-			c.wm.Unlock()
+		}
 
-			for _, workerId := range failedWorkers {
-				c.handleFailedWorkerTasks(workerId)
+		// fmt.Println("heartbeat check")
+		c.wm.Lock()
+		failedWorkers := []uuid.UUID{}
+		for workerId, workerMetadata := range c.workers {
+			if !workerMetadata.failed && time.Since(workerMetadata.lastHeartbeat) > 10*time.Second {
+				workerMetadata.failed = true
+				failedWorkers = append(failedWorkers, workerId)
 			}
 		}
+		c.wm.Unlock()
+
+		for _, workerId := range failedWorkers {
+			c.handleFailedWorkerTasks(workerId)
+		}
+
+		time.Sleep(time.Second)
 	}
 }
 
