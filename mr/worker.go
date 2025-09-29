@@ -48,23 +48,19 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	go heartbeat()
 
 	for {
-		fmt.Println("requesting task")
 		reqTaskReply := requestTask()
 		if reqTaskReply == nil {
-			fmt.Printf("Worker %v: failed RPC\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		if len(reqTaskReply.Task.FileNames) == 0 {
-			fmt.Printf("Worker %v: no task yet, retrying...\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		task := reqTaskReply.Task
 		nReduce := reqTaskReply.NReduce
-		fmt.Printf("Worker %v received task: %v\n", workerId, task)
 
 		switch task.Typ {
 		case MapTask:
@@ -84,7 +80,6 @@ func registerWorker() {
 	if !ok {
 		log.Fatalf("Worker registration failed")
 	}
-	fmt.Printf("Worker registered with ID: %v\n", workerId)
 }
 
 // Runs the Heartbeat RPC every 2 seconds
@@ -104,15 +99,12 @@ func requestTask() *RequestTaskReply {
 	reqReply := RequestTaskReply{}
 	ok := call("Coordinator.RequestTask", &reqArgs, &reqReply)
 	if !ok {
-		fmt.Printf("Failed to request task. Retrying...")
 		return nil
 	}
 	return &reqReply
 }
 
 func executeMapTask(task *Task, nReduce int, mapf func(string, string) []KeyValue) {
-	fmt.Printf("Worker %v executing map task: %v\n", workerId, task)
-
 	inputFile := task.FileNames[0]
 	file, err := os.Open(inputFile)
 	if err != nil {
@@ -183,8 +175,6 @@ func completeTask(task *Task, filenames []string) {
 }
 
 func executeReduceTask(task *Task, reducef func(string, []string) string) {
-	fmt.Printf("Worker %v executing reduce task: %v\n", workerId, task)
-
 	intermediate := []KeyValue{}
 	for _, fileName := range task.FileNames {
 		f, err := os.Open(fileName)
@@ -236,35 +226,6 @@ func executeReduceTask(task *Task, reducef func(string, []string) string) {
 	completeTask(task, nil)
 }
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-// func CallExample() {
-
-// 	// declare an argument structure.
-// 	args := ExampleArgs{}
-
-// 	// fill in the argument(s).
-// 	args.X = 99
-
-// 	// declare a reply structure.
-// 	reply := ExampleReply{}
-
-// 	// send the RPC request, wait for the reply.
-// 	// the "Coordinator.Example" tells the
-// 	// receiving server that we'd like to call
-// 	// the Example() method of struct Coordinator.
-// 	ok := call("Coordinator.Example", &args, &reply)
-// 	if ok {
-// 		// reply.Y should be 100.
-// 		fmt.Printf("reply.Y %v\n", reply.Y)
-// 	} else {
-// 		fmt.Printf("call failed!\n")
-// 	}
-// }
-
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
@@ -282,6 +243,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
 	return false
 }
