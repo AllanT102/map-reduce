@@ -296,51 +296,7 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 	}
 
 	fmt.Println(len(c.taskPool), "tasks in the task pool after handling failed worker tasks")
-	// delete(c.tasks, failedWorkerId)
 	fmt.Println("Finished handling failed worker tasks for worker:", failedWorkerId)
-
-	// // if in reducing phase and has only done reduce tasks, then just reassign reduce tasks to task pool and exit
-	// if c.state == Reducing {
-	// 	hasCompletedMapTasks := false
-	// 	for _, task := range c.tasks[failedWorkerId] {
-	// 		if task.Typ == MapTask {
-	// 			hasCompletedMapTasks = true
-	// 		}
-	// 	}
-	// 	// no map tasks found
-	// 	if !hasCompletedMapTasks {
-	// 		for _, task := range c.tasks[failedWorkerId] {
-	// 			task.Status = Idle
-	// 			c.taskPool <- *task
-	// 		}
-
-	// 		delete(c.tasks, failedWorkerId)
-	// 		return
-	// 	}
-	// }
-
-	// // flush task pool if in reduce phase and notify all reduce workers to re-request tasks
-	// if c.state == Reducing {
-	// 	c.notifyMapTaskFailure()
-	// 	for len(c.taskPool) > 0 {
-	// 		<-c.taskPool
-	// 	}
-	// }
-
-	// // loop over all map tasks that worker has completed and redo them
-	// for _, task := range c.tasks[failedWorkerId] {
-	// 	if task.Typ == MapTask {
-	// 		task.Status = Idle
-	// 		c.taskPool <- *task
-	// 	}
-	// }
-
-	// // since tasks are reassigned, delete the worker mapping as that worker has now technically not procesed any tasks
-	// delete(c.tasks, failedWorkerId)
-
-	// // start up the task monitor again because we are back in the mapping phase
-	// c.state = Mapping
-	// go c.mapTaskMonitor()
 }
 
 /*
@@ -380,8 +336,6 @@ func (c *Coordinator) mapTaskMonitor() {
 
 	// // barrier
 	// c.wg.Wait()
-
-	// hacky as fuck, but barrier/wg impl introduces edge cases
 	for {
 		c.tm.Lock()
 		count := 0
@@ -411,7 +365,7 @@ func (c *Coordinator) initReducePhase() {
 	// create R reduce tasks and add to task pool
 	intermediateFilesByPartition := make(map[int][]string)
 
-	// this is slow af, try to optimize later if possible
+	// this is slow, try to optimize later if possible
 	for _, workerTasks := range c.tasks {
 		for _, task := range workerTasks {
 			if task.Typ == MapTask && task.Status == Completed {
