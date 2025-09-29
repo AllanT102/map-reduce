@@ -190,7 +190,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		workers:            make(map[uuid.UUID]*WorkerMetadata),
 		tasks:              make(map[uuid.UUID]map[uuid.UUID]*Task), // map of worker ID to map of taskId to Task
-		taskPool:           make(chan Task, len(files)),             // buffer size equal to number of tasks
+		taskPool:           make(chan Task, len(files) + nReduce),             // buffer size equal to number of tasks
 		tm:                 sync.Mutex{},
 		wm:                 sync.Mutex{},
 		nInitialInputFiles: len(files),
