@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"net/rpc"
 	"os"
 	"sort"
 	"time"
