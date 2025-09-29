@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -129,7 +128,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 	c.tm.Lock()
 	defer c.tm.Unlock()
 
-	fmt.Printf("Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
+	// fmt.Printf("Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
 
 	select {
 	case task, ok := <-c.taskPool:
@@ -161,18 +160,18 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	defer c.stateM.Unlock()
 	defer c.tm.Unlock()
 
-	fmt.Printf("CompleteTask called: worker=%v, task=%v\n", args.WorkerId, args.TaskId)
+	// fmt.Printf("CompleteTask called: worker=%v, task=%v\n", args.WorkerId, args.TaskId)
 
 	// if the task is already marked as completed, ignore it
 	if args != nil && c.tasks[args.WorkerId] != nil &&
 		c.tasks[args.WorkerId][args.TaskId] != nil &&
 		c.tasks[args.WorkerId][args.TaskId].Status == Completed {
-		fmt.Printf("Task %v from worker %v already completed, ignoring\n", args.TaskId, args.WorkerId)
+		// fmt.Printf("Task %v from worker %v already completed, ignoring\n", args.TaskId, args.WorkerId)
 		return nil
 	}
 
 	c.tasks[args.WorkerId][args.TaskId].Status = Completed
-	fmt.Printf("Task %v from worker %v marked as Completed\n", args.TaskId, args.WorkerId)
+	// fmt.Printf("Task %v from worker %v marked as Completed\n", args.TaskId, args.WorkerId)
 
 	if c.tasks[args.WorkerId][args.TaskId].Typ == MapTask {
 		c.tasks[args.WorkerId][args.TaskId].FileNames = args.IntermediateFiles
@@ -278,7 +277,7 @@ If state is in reducing phase and failed worker has done map tasks, then:
 Loop over all map tasks that worker has completed and redo them
 */
 func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
-	fmt.Println("Handling failed worker tasks for worker:", failedWorkerId)
+	// fmt.Println("Handling failed worker tasks for worker:", failedWorkerId)
 	c.tm.Lock()
 	c.stateM.Lock()
 	defer c.tm.Unlock()
@@ -295,8 +294,8 @@ func (c *Coordinator) handleFailedWorkerTasks(failedWorkerId uuid.UUID) {
 		}
 	}
 
-	fmt.Println(len(c.taskPool), "tasks in the task pool after handling failed worker tasks")
-	fmt.Println("Finished handling failed worker tasks for worker:", failedWorkerId)
+	// fmt.Println(len(c.taskPool), "tasks in the task pool after handling failed worker tasks")
+	// fmt.Println("Finished handling failed worker tasks for worker:", failedWorkerId)
 }
 
 /*
@@ -346,10 +345,10 @@ func (c *Coordinator) mapTaskMonitor() {
 				}
 			}
 		}
-		fmt.Printf("mapTaskMonitor: %d/%d map tasks completed\n", count, c.nInitialInputFiles)
+		// fmt.Printf("mapTaskMonitor: %d/%d map tasks completed\n", count, c.nInitialInputFiles)
 
 		if count == c.nInitialInputFiles {
-			fmt.Println("All map tasks completed, initializing reduce phase")
+			// fmt.Println("All map tasks completed, initializing reduce phase")
 			c.tm.Unlock()
 			break
 		}
@@ -389,8 +388,8 @@ func (c *Coordinator) initReducePhase() {
 			FileNames: fileNames,
 			Partition: partition,
 		}
-		fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
-		fmt.Printf("p2.Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
+		// fmt.Printf("Created reduce task for partition %d with files: %v\n", partition, fileNames)
+		// fmt.Printf("p2.Coordinator state %v, len(taskPool)=%d\n", c.state, len(c.taskPool))
 	}
 
 	c.stateM.Lock()

@@ -48,23 +48,23 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	go heartbeat()
 
 	for {
-		fmt.Println("requesting task")
+		// fmt.Println("requesting task")
 		reqTaskReply := requestTask()
 		if reqTaskReply == nil {
-			fmt.Printf("Worker %v: failed RPC\n", workerId)
+			// fmt.Printf("Worker %v: failed RPC\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		if len(reqTaskReply.Task.FileNames) == 0 {
-			fmt.Printf("Worker %v: no task yet, retrying...\n", workerId)
+			// fmt.Printf("Worker %v: no task yet, retrying...\n", workerId)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		task := reqTaskReply.Task
 		nReduce := reqTaskReply.NReduce
-		fmt.Printf("Worker %v received task: %v\n", workerId, task)
+		// fmt.Printf("Worker %v received task: %v\n", workerId, task)
 
 		switch task.Typ {
 		case MapTask:
@@ -84,7 +84,7 @@ func registerWorker() {
 	if !ok {
 		log.Fatalf("Worker registration failed")
 	}
-	fmt.Printf("Worker registered with ID: %v\n", workerId)
+	// fmt.Printf("Worker registered with ID: %v\n", workerId)
 }
 
 // Runs the Heartbeat RPC every 2 seconds
@@ -104,14 +104,14 @@ func requestTask() *RequestTaskReply {
 	reqReply := RequestTaskReply{}
 	ok := call("Coordinator.RequestTask", &reqArgs, &reqReply)
 	if !ok {
-		fmt.Printf("Failed to request task. Retrying...")
+		// fmt.Printf("Failed to request task. Retrying...")
 		return nil
 	}
 	return &reqReply
 }
 
 func executeMapTask(task *Task, nReduce int, mapf func(string, string) []KeyValue) {
-	fmt.Printf("Worker %v executing map task: %v\n", workerId, task)
+	// fmt.Printf("Worker %v executing map task: %v\n", workerId, task)
 
 	inputFile := task.FileNames[0]
 	file, err := os.Open(inputFile)
@@ -183,7 +183,7 @@ func completeTask(task *Task, filenames []string) {
 }
 
 func executeReduceTask(task *Task, reducef func(string, []string) string) {
-	fmt.Printf("Worker %v executing reduce task: %v\n", workerId, task)
+	// fmt.Printf("Worker %v executing reduce task: %v\n", workerId, task)
 
 	intermediate := []KeyValue{}
 	for _, fileName := range task.FileNames {
